@@ -44,7 +44,7 @@ const (
 	AuthFlag        = 0x0002
 	PongFlag        = 0x0004
 	AdaptiveFECFlag = 0x0008
-	AetherALPN      = "aether/1"
+	AetherALPN      = "h2"
 
 	TargetDialTimeout  = 30 * time.Second
 	MaxConcurrentConns = 2000
@@ -1593,12 +1593,11 @@ func (dm *ProtocolDemux) demuxConn(conn net.Conn) {
 		wrappedConn := &PrefixConn{Conn: conn, prefix: fullCH}
 
 		sni, isCH := extractSNI(fullCH)
-		isAether := clientHelloHasALPN(fullCH, AetherALPN)
 		configMu.RLock()
 		domain := GlobalConfig.Domain
 		configMu.RUnlock()
 
-		if domain != "" && isCH && sni != domain && !isAether {
+		if domain != "" && isCH && sni != domain {
 			fallbackToCamo(wrappedConn, nil)
 			return
 		}

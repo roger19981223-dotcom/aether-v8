@@ -33,7 +33,7 @@ const (
 	AuthFlag           = 0x0002
 	PongFlag           = 0x0004
 	AdaptiveFECFlag    = 0x0008
-	AetherALPN         = "aether/1"
+	AetherALPN         = "h2"
 	DialTimeout        = 15 * time.Second
 	HandshakeTimeout   = 15 * time.Second
 	MaxConcurrentConns = 2000
