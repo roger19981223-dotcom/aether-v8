@@ -396,6 +396,8 @@ func (ar *TCPReassembler) drainReady() {
 		if payload != nil {
 			select {
 			case ar.outputCh <- payload:
+			case <-ar.stopCh:
+				return
 			default:
 				log.Printf("[WARN] outputCh full, dropping seq %d", ar.nextExpectedSeq)
 			}
@@ -461,6 +463,7 @@ func (ar *TCPReassembler) Close() {
 	ar.closeOnce.Do(func() {
 		ar.cleanupTicker.Stop()
 		close(ar.stopCh)
+		close(ar.outputCh)
 	})
 }
 
