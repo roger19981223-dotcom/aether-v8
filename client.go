@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"flag"
 	"net/http"
 	"os"
 	"runtime"
@@ -36,13 +37,13 @@ const (
 	DialTimeout        = 15 * time.Second
 	HandshakeTimeout   = 15 * time.Second
 	MaxConcurrentConns = 2000
-	VLESSListenAddr    = "0.0.0.0:11080"
-	ClientCfgFile      = "aether_client.json"
 	SafeMTUPayload     = 1350
 	BlockAlignment     = 64
 )
 
 var (
+	VLESSListenAddr = "0.0.0.0:11080"
+	ClientCfgFile   = "aether_client.json"
 	shardPool  = sync.Pool{New: func() interface{} { b := make([]byte, HeaderSize+MSS+1024); return &b }}
 	framePool  = sync.Pool{New: func() interface{} { return make([]byte, 16384) }}
 	outputPool = sync.Pool{New: func() interface{} { return make([]byte, 16*MSS+1024) }}
@@ -483,7 +484,7 @@ func (s *SafeStream) Write(b []byte) (int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	s.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 	defer s.conn.SetWriteDeadline(time.Time{})
 	n, err := s.conn.Write(b)
 	if err != nil {
@@ -738,7 +739,7 @@ func (c *AdaptiveDispatcher) streamReadLoop(st *SafeStream) {
 }
 
 func (c *AdaptiveDispatcher) monitorHealth() {
-	tk := time.NewTicker(3 * time.Second)
+	tk := time.NewTicker(2 * time.Second)
 	defer tk.Stop()
 	for {
 		select {
@@ -785,14 +786,14 @@ func (c *AdaptiveDispatcher) monitorHealth() {
 							st.Close()
 						}
 
-						tc := time.NewTimer(3 * time.Second)
+						tc := time.NewTimer(2 * time.Second)
 						select {
 						case <-st.pingCh:
 							tc.Stop()
 							st.lossCount.Store(0)
 						case <-tc.C:
 							st.lossCount.Add(1)
-							if st.lossCount.Load() > 2 {
+							if st.lossCount.Load() > 1 {
 								st.Close()
 							}
 						}
@@ -977,6 +978,7 @@ func (c *AdaptiveDispatcher) SendChunk(data []byte) {
 			
 			pkt := buf[:pe+int(pl)]
 			if _, err := st.Write(pkt); err != nil {
+				st.Close()
 			}
 		}
 		o = e
@@ -1188,7 +1190,7 @@ func (c *AdaptiveDispatcher) DialProxy(conn net.Conn) {
 					if !ok {
 						return
 					}
-					pc.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+					pc.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 					if _, err := pc.conn.Write(p); err != nil {
 						return
 					}
@@ -1336,6 +1338,12 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
+	vlessPort := flag.String("listen", "0.0.0.0:11080", "VLESS listen address")
+	panelPort := flag.String("panel", "0.0.0.0:9999", "Web panel listen address")
+	cfgFile := flag.String("config", "aether_client.json", "Config file path")
+	flag.Parse()
+	ClientCfgFile = *cfgFile
+	VLESSListenAddr = *vlessPort
 	initConfig()
 	applyEngine()
 	http.HandleFunc("/api", handleAPI)
@@ -1346,7 +1354,261 @@ func main() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(clientHTML))
 	})
-	http.ListenAndServe("0.0.0.0:9999", nil)
+	log.Printf("[CLI] Panel: %s, VLESS: %s", *panelPort, *vlessPort)
+	http.ListenAndServe(*panelPort, nil)
 }
 
-const clientHTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Aether Client</title><script src="https://cdn.tailwindcss.com"></script><script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script><style>body{background-color:#f9fafb;color:#111827;font-family:system-ui,-apple-system,sans-serif}</style></head><body><div id="app" class="max-w-4xl mx-auto p-6 mt-10"><div class="flex justify-between items-end mb-8"><div><h1 class="text-4xl font-black tracking-tight mb-2">Aether<span class="text-blue-500">.</span>Client</h1><p class="text-gray-500 font-medium">Enterprise Edition Gateway</p></div><div class="text-right"><div class="text-sm font-bold text-gray-400 mb-2">本地监听</div><div class="text-xl font-mono text-gray-800 bg-white px-4 py-2 rounded shadow-sm border border-gray-100">VLESS 127.0.0.1:11080</div></div></div><div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mb-8"><div class="p-8 flex items-center justify-between border-b border-gray-50"><div class="flex items-center gap-6"><div class="relative"><div class="w-20 h-20 rounded-full flex items-center justify-center transition-colors duration-500" :class="r?'bg-blue-100':'bg-gray-100'"><div class="w-16 h-16 rounded-full flex items-center justify-center text-3xl transition-colors duration-500" :class="r?'bg-blue-500 text-white shadow-lg shadow-blue-500/40':'bg-gray-300 text-gray-500'">⚡</div></div><div v-if="r" class="absolute top-0 right-0 w-5 h-5 bg-green-500 border-4 border-white rounded-full"></div></div><div><h2 class="text-2xl font-bold tracking-tight mb-1">核心引擎引擎状态</h2><p class="text-gray-500 font-medium text-sm">控制全链路加速与混淆</p></div></div><button @click="toggleEngine" :class="r?'bg-red-500 hover:bg-red-600 shadow-red-500/30':'bg-black hover:bg-gray-800 shadow-gray-900/30'" class="px-8 py-4 rounded-xl text-white font-black tracking-widest transition-all shadow-lg">{{r?'断开连接 STOP':'启动引擎 START'}}</button></div></div><div class="flex justify-between items-center mb-6"><h2 class="text-2xl font-bold tracking-tight">节点池配置</h2><button @click="openNodeModal(null)" class="bg-gray-900 text-white px-5 py-2.5 rounded-lg font-bold shadow hover:bg-gray-700 transition">+ 导入节点</button></div><div class="grid grid-cols-1 md:grid-cols-2 gap-4"><div v-for="n in c.nodes" class="bg-white rounded-xl p-5 shadow-sm border transition cursor-pointer hover:border-blue-300 relative overflow-hidden" :class="c.active_node_id===n.id?'border-blue-500 ring-2 ring-blue-500/20':'border-gray-200'" @click="c.active_node_id=n.id;saveConfig()"><div v-if="c.active_node_id===n.id" class="absolute top-0 right-0 bg-blue-500 text-white text-xs font-bold px-3 py-1 rounded-bl-lg">当前使用</div><h3 class="font-bold text-lg mb-1 truncate pr-16">{{n.name}}</h3><p class="text-gray-500 font-mono text-xs mb-4">{{n.server}}</p><div class="flex gap-2"><button @click.stop="openNodeModal(n)" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-sm font-bold transition flex-1">配置</button><button @click.stop="copyLink()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1.5 rounded text-sm font-bold transition flex-1">导出</button><button @click.stop="delNode(n.id)" class="bg-red-50 hover:bg-red-100 text-red-600 px-3 py-1.5 rounded text-sm font-bold transition flex-1">删除</button></div></div><div v-if="c.nodes.length===0" class="col-span-full bg-gray-50 border-2 border-dashed border-gray-200 rounded-xl p-12 text-center text-gray-400 font-bold">目前还没有配置任何节点，点击右上角导入。</div></div><div v-if="showModal" class="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50"><div class="bg-white p-8 rounded-2xl w-[480px] shadow-2xl border border-gray-100"><h3 class="text-2xl font-bold mb-6">{{isEdit?'编辑节点参数':'导入新节点'}}</h3><div class="space-y-4"><div><label class="block text-sm font-bold text-gray-500 mb-1">别名</label><input v-model="editNode.name" class="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-500 transition"></div><div><label class="block text-sm font-bold text-gray-500 mb-1">服务器 IP:端口</label><input v-model="editNode.server" class="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-500 transition font-mono"></div><div class="grid grid-cols-2 gap-4"><div><label class="block text-sm font-bold text-gray-500 mb-1">用户名</label><input v-model="editNode.username" class="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-500 transition"></div><div><label class="block text-sm font-bold text-gray-500 mb-1">鉴权密钥</label><input v-model="editNode.password" class="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-500 transition"></div></div><div><label class="block text-sm font-bold text-gray-500 mb-1">伪装域名 (SNI)</label><input v-model="editNode.sni" class="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:border-blue-500 transition font-mono" placeholder="www.microsoft.com"></div><div class="flex gap-4 mt-8"><button @click="saveNode" class="flex-1 bg-black text-white p-3 rounded-lg font-bold shadow hover:bg-gray-800 transition">保存配置</button><button @click="showModal=false" class="flex-1 bg-gray-100 text-gray-600 p-3 rounded-lg font-bold hover:bg-gray-200 transition">取消</button></div></div></div></div></div><script>Vue.createApp({data(){return{r:false,c:{enable:false,active_node_id:'',nodes:[]},showModal:false,isEdit:false,editNode:{}}},methods:{copyLink(){let u='vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.1:11080?encryption=none&security=none&type=tcp&headerType=none#Aether-Local';let e=document.createElement('textarea');e.value=u;document.body.appendChild(e);e.select();document.execCommand('copy');document.body.removeChild(e);alert('本地 VLESS 节点链接已复制！\n请直接在 PassWall 节点列表通过“分享链接”导入。');},async loadStatus(){let res=await fetch('/api');let d=await res.json();this.r=d.running;if(!this.showModal){this.c=d.conf}},async saveConfig(){await fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(this.c)})},async toggleEngine(){this.c.enable=!this.c.enable;await this.saveConfig()},openNodeModal(n){if(n){this.isEdit=true;this.editNode=JSON.parse(JSON.stringify(n))}else{this.isEdit=false;this.editNode={id:'n_'+Math.random().toString(36).substr(2,9),name:'',server:'',username:'Default',password:'',sni:''}}this.showModal=true},async saveNode(){if(!this.editNode.name||!this.editNode.server){alert("别名和服务器地址不能为空");return}if(this.isEdit){let idx=this.c.nodes.findIndex(x=>x.id===this.editNode.id);if(idx>-1)this.c.nodes[idx]=this.editNode}else{this.c.nodes.push(this.editNode);if(this.c.nodes.length===1){this.c.active_node_id=this.editNode.id}}this.showModal=false;await this.saveConfig();this.loadStatus()},async delNode(id){if(!confirm("确定要删除此节点吗？"))return;this.c.nodes=this.c.nodes.filter(x=>x.id!==id);if(this.c.active_node_id===id){this.c.active_node_id=this.c.nodes.length>0?this.c.nodes[0].id:''}await this.saveConfig();this.loadStatus()}},mounted(){this.loadStatus();setInterval(this.loadStatus,2000)}}).mount('#app')</script></body></html>`
+const clientHTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SuperYellow Proxy</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f172a;--card:#1e293b;--card2:#334155;--accent:#f59e0b;--accent2:#fbbf24;--green:#22c55e;--red:#ef4444;--text:#f1f5f9;--text2:#94a3b8;--border:#475569;--radius:12px}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+.c{max-width:960px;margin:0 auto;padding:24px 20px}
+.hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;padding-bottom:20px;border-bottom:1px solid var(--border)}
+.hd h1{font-size:22px;font-weight:700}
+.hd .sub{color:var(--text2);font-size:13px;margin-top:2px}
+.sb{display:flex;gap:16px;margin-bottom:24px;flex-wrap:wrap}
+.st{flex:1;min-width:140px;background:var(--card);border-radius:var(--radius);padding:16px 20px}
+.st .lb{font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.st .vl{font-size:20px;font-weight:700}
+.on{color:var(--green)}.off{color:var(--red)}.ac{color:var(--accent)}
+.cr{background:var(--card);border-radius:var(--radius);padding:24px;margin-bottom:20px}
+.cr h2{font-size:16px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.nl{display:flex;flex-direction:column;gap:10px}
+.nd{background:var(--card2);border-radius:10px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;transition:.2s;border:2px solid transparent}
+.nd:hover{background:#3e5068}.nd.act{border-color:var(--accent);background:rgba(245,158,11,.08)}
+.nd .nm{font-weight:600;font-size:15px;margin-bottom:3px}
+.nd .ad{color:var(--text2);font-size:13px;font-family:monospace}
+.badge{font-size:10px;background:var(--accent);color:#000;padding:1px 8px;border-radius:99px;font-weight:700;margin-left:8px}
+.btn{padding:7px 16px;border-radius:8px;border:none;font-size:13px;font-weight:600;cursor:pointer;transition:.15s}
+.btn:active{transform:scale(.97)}.btn-sm{padding:5px 12px;font-size:12px}
+.btn-p{background:var(--accent);color:#000}.btn-p:hover{background:var(--accent2)}
+.btn-g{background:transparent;color:var(--text2);border:1px solid var(--border)}.btn-g:hover{color:var(--text);border-color:var(--text2)}
+.btn-d{background:transparent;color:var(--red);border:1px solid rgba(239,68,68,.3)}.btn-d:hover{background:rgba(239,68,68,.1)}
+.btn-gn{background:var(--green);color:#000}.btn-gn:hover{background:#16a34a}
+.btn-r{background:var(--red);color:#fff}.btn-r:hover{background:#dc2626}
+.tb{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px}
+.tb h2{margin:0}.cg{display:flex;gap:6px}
+.emp{text-align:center;padding:40px;color:var(--text2);font-size:14px}
+.mm{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:.2s}
+.mm.show{opacity:1;pointer-events:auto}
+.md{background:var(--card);border-radius:16px;padding:28px;width:440px;max-width:90vw;transform:translateY(20px);transition:.2s}
+.mm.show .md{transform:translateY(0)}
+.md h3{font-size:18px;margin-bottom:20px}
+.fg{margin-bottom:14px}.fg label{display:block;font-size:12px;color:var(--text2);font-weight:600;margin-bottom:5px;text-transform:uppercase;letter-spacing:.3px}
+.fg input{width:100%;padding:10px 14px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;outline:none;transition:.2s}
+.fg input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(245,158,11,.15)}
+.fg input::placeholder{color:#64748b}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ma{display:flex;gap:10px;margin-top:20px}.ma .btn{flex:1;padding:10px}
+.tst{position:fixed;top:20px;right:20px;background:var(--green);color:#000;padding:12px 20px;border-radius:10px;font-weight:600;font-size:14px;z-index:200;transform:translateX(120%);transition:.3s}
+.tst.show{transform:translateX(0)}
+.acts{display:flex;gap:8px;margin-left:16px}
+@media(max-width:640px){.sb{flex-direction:column}.fr{grid-template-columns:1fr}.hd{flex-direction:column;align-items:flex-start;gap:12px}.nd{flex-direction:column;align-items:flex-start;gap:10px}.acts{margin-left:0}}
+</style>
+</head>
+<body>
+<div class="c">
+  <div class="hd">
+    <div><h1 id="title">&#128992; SuperYellow Proxy</h1><div class="sub">Multi-stream VLESS Tunnel with FEC</div></div>
+    <div><button id="toggleBtn" class="btn btn-gn" onclick="toggle()">&#9654; 启动引擎</button></div>
+  </div>
+
+  <div class="sb">
+    <div class="st"><div class="lb">引擎状态</div><div class="vl" id="s1">-</div></div>
+    <div class="st"><div class="lb">节点数量</div><div class="vl ac" id="s2">-</div></div>
+    <div class="st"><div class="lb">当前节点</div><div class="vl" id="s3" style="font-size:15px">-</div></div>
+    <div class="st"><div class="lb">本地端口</div><div class="vl" style="font-size:15px;font-family:monospace">:11081</div></div>
+  </div>
+
+  <div class="cr">
+    <div class="tb">
+      <h2>&#128225; 节点列表</h2>
+      <div class="cg">
+        <button class="btn btn-g btn-sm" onclick="copyVless()">&#128279; 复制链接</button>
+        <button class="btn btn-g btn-sm" onclick="copyJson()">&#128203; 复制配置</button>
+        <button class="btn btn-p btn-sm" onclick="openModal(null)">+ 添加节点</button>
+      </div>
+    </div>
+    <div class="nl" id="nodeList"></div>
+  </div>
+
+  <div class="cr">
+    <h2>&#128214; 使用说明</h2>
+    <div style="color:var(--text2);font-size:14px;line-height:1.8">
+      <p>1. 点击「+ 添加节点」填入你的 SuperYellow 服务器信息</p>
+      <p>2. 选中节点后，前往 <strong style="color:var(--text)">PassWall → 节点列表</strong> 选择「SuperYellow」</p>
+      <p>3. 将 PassWall 的 TCP 模式设为「使用列表外代理」即可</p>
+      <p style="margin-top:8px;color:var(--accent)">&#128161; 服务器需要先在 Web 面板注册用户才能连接</p>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="mm" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="md">
+    <h3 id="modalTitle">添加节点</h3>
+    <div class="fg"><label>节点名称</label><input id="fName" placeholder="例：我的服务器"></div>
+    <div class="fg"><label>服务器地址 (IP:端口)</label><input id="fServer" placeholder="例：1.2.3.4:8443" style="font-family:monospace"></div>
+    <div class="fr">
+      <div class="fg"><label>用户名</label><input id="fUser" placeholder="Default"></div>
+      <div class="fg"><label>密码</label><input id="fPass" type="password" placeholder="鉴权密钥"></div>
+    </div>
+    <div class="fg"><label>SNI (伪装域名)</label><input id="fSni" placeholder="例：chaofanbox.top" style="font-family:monospace"></div>
+    <div class="ma">
+      <button class="btn btn-g" onclick="closeModal()">取消</button>
+      <button class="btn btn-p" onclick="saveNode()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="tst" id="toast"></div>
+
+<script>
+var conf={enable:false,active_node_id:'',nodes:[]};
+var running=false;
+var editId=null;
+
+function load(){
+  fetch('/api').then(function(r){return r.json()}).then(function(d){
+    running=d.running;
+    conf=d.conf||conf;
+    render();
+  }).catch(function(){});
+}
+
+function render(){
+  var dot=document.getElementById('title');
+  dot.innerHTML='<span style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;background:'+(running?'#22c55e;box-shadow:0 0 10px rgba(34,197,94,.6)':'#ef4444')+'"></span>SuperYellow Proxy';
+
+  document.getElementById('s1').innerHTML=running?'<span class="on">运行中</span>':'<span class="off">已停止</span>';
+  document.getElementById('s2').textContent=conf.nodes.length;
+  var an=conf.nodes.find(function(n){return n.id===conf.active_node_id});
+  document.getElementById('s3').textContent=an?an.name:'未选择';
+
+  var btn=document.getElementById('toggleBtn');
+  if(running){btn.className='btn btn-r';btn.innerHTML='&#9632; 停止引擎'}
+  else{btn.className='btn btn-gn';btn.innerHTML='&#9654; 启动引擎'}
+
+  var list=document.getElementById('nodeList');
+  if(conf.nodes.length===0){
+    list.innerHTML='<div class="emp"><div style="font-size:32px;margin-bottom:8px">&#128225;</div>还没有配置节点，点击右上角「+ 添加节点」开始</div>';
+    return;
+  }
+  var h='';
+  conf.nodes.forEach(function(n){
+    var act=n.id===conf.active_node_id;
+    h+='<div class="nd'+(act?' act':'')+'" onclick="selectNode(\''+n.id+'\')">';
+    h+='<div><div class="nm">'+esc(n.name)+(act?'<span class="badge">当前</span>':'')+'</div>';
+    h+='<div class="ad">'+esc(n.server)+' &middot; '+esc(n.username)+'</div></div>';
+    h+='<div class="acts">';
+    h+='<button class="btn btn-g btn-sm" onclick="event.stopPropagation();openModal(\''+n.id+'\')">&#9998; 编辑</button>';
+    h+='<button class="btn btn-d btn-sm" onclick="event.stopPropagation();delNode(\''+n.id+'\')">&#128465; 删除</button>';
+    h+='</div></div>';
+  });
+  list.innerHTML=h;
+}
+
+function esc(s){return s?s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'):''}
+
+function save(){
+  fetch('/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(conf)}).then(function(){});
+}
+
+function toggle(){
+  conf.enable=!conf.enable;
+  save();
+  setTimeout(load,1500);
+}
+
+function selectNode(id){
+  conf.active_node_id=id;
+  save();
+}
+
+function openModal(id){
+  editId=id;
+  var m=document.getElementById('modal');
+  if(id){
+    var n=conf.nodes.find(function(x){return x.id===id});
+    if(!n)return;
+    document.getElementById('modalTitle').textContent='编辑节点';
+    document.getElementById('fName').value=n.name;
+    document.getElementById('fServer').value=n.server;
+    document.getElementById('fUser').value=n.username;
+    document.getElementById('fPass').value=n.password;
+    document.getElementById('fSni').value=n.sni||'';
+  }else{
+    document.getElementById('modalTitle').textContent='添加节点';
+    document.getElementById('fName').value='';
+    document.getElementById('fServer').value='';
+    document.getElementById('fUser').value='Default';
+    document.getElementById('fPass').value='';
+    document.getElementById('fSni').value='';
+  }
+  m.className='mm show';
+  setTimeout(function(){document.getElementById('fName').focus()},100);
+}
+
+function closeModal(){document.getElementById('modal').className='mm'}
+
+function saveNode(){
+  var name=document.getElementById('fName').value.trim();
+  var server=document.getElementById('fServer').value.trim();
+  if(!name||!server){alert('名称和服务器地址不能为空');return}
+  var obj={
+    name:name,server:server,
+    username:document.getElementById('fUser').value.trim()||'Default',
+    password:document.getElementById('fPass').value,
+    sni:document.getElementById('fSni').value.trim()
+  };
+  if(editId){
+    var idx=conf.nodes.findIndex(function(x){return x.id===editId});
+    if(idx>-1){obj.id=editId;conf.nodes[idx]=obj}
+  }else{
+    obj.id='n_'+Math.random().toString(36).substr(2,8);
+    conf.nodes.push(obj);
+    if(conf.nodes.length===1)conf.active_node_id=obj.id;
+  }
+  closeModal();save();showToast('已保存');
+}
+
+function delNode(id){
+  var n=conf.nodes.find(function(x){return x.id===id});
+  if(!confirm('确定删除「'+(n?n.name:'')+'」？'))return;
+  conf.nodes=conf.nodes.filter(function(x){return x.id!==id});
+  if(conf.active_node_id===id)conf.active_node_id=conf.nodes.length?conf.nodes[0].id:'';
+  save();showToast('已删除');
+}
+
+function copyVless(){
+  var n=conf.nodes.find(function(x){return x.id===conf.active_node_id});
+  if(!n){alert('请先选择一个节点');return}
+  var link='vless://'+encodeURIComponent(n.username)+'@'+n.server+'?encryption=none&security=tcp&sni='+(n.sni||'')+'&type=tcp&headerType=none#'+encodeURIComponent(n.name);
+  copyText(link);showToast('VLESS 链接已复制');
+}
+
+function copyJson(){
+  copyText(JSON.stringify(conf,null,2));showToast('配置 JSON 已复制');
+}
+
+function copyText(t){
+  if(navigator.clipboard){navigator.clipboard.writeText(t)}
+  else{var e=document.createElement('textarea');e.value=t;document.body.appendChild(e);e.select();document.execCommand('copy');document.body.removeChild(e)}
+}
+
+function showToast(msg){
+  var t=document.getElementById('toast');t.textContent=msg;t.className='tst show';
+  setTimeout(function(){t.className='tst'},2500);
+}
+
+load();
+setInterval(load,3000);
+</script>
+</body>
+</html>`
