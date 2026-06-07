@@ -827,17 +827,35 @@ func NewServer() *Server {
 }
 
 func (srv *Server) GetOrCreate(cid uint32, uid string) *Session {
+	// FIX: Check existing under lock, release before creating new session.
+	// Prevents deadlock where sj() holds srv.mu and calls s.Close() -> s.sm.Lock()
+	// while this goroutine holds s.sm and waits for srv.mu.
 	srv.mu.Lock()
-	defer srv.mu.Unlock()
 	if s, ok := srv.s[cid]; ok {
 		if !s.ic.Load() {
+			srv.mu.Unlock()
 			return s
 		}
-		// 核心修复：踢出僵尸会话，允许客户端断流后光速原地重建
+		// Zombie session - remove and replace
 		delete(srv.s, cid)
 	}
+	srv.mu.Unlock()
+
+	// Create session OUTSIDE global lock
 	s := NewSession(cid, uid)
+
+	srv.mu.Lock()
+	// Double-check: another goroutine may have created this session
+	if existing, ok := srv.s[cid]; ok {
+		srv.mu.Unlock()
+		if !existing.ic.Load() {
+			return existing
+		}
+		// Existing is zombie, use our new one
+		srv.mu.Lock()
+	}
 	srv.s[cid] = s
+	srv.mu.Unlock()
 	return s
 }
 
@@ -846,14 +864,21 @@ func (srv *Server) sj() {
 	defer tk.Stop()
 	for range tk.C {
 		n := time.Now().Unix()
+		// FIX: Collect stale session IDs under lock, release lock, THEN close them.
+		// This prevents deadlock where s.Close() tries to acquire s.sm while
+		// another goroutine holds s.sm and waits for srv.mu.
+		var stale []*Session
 		srv.mu.Lock()
 		for cid, s := range srv.s {
-			if n-s.la.Load() > 300 {
-				s.Close()
+			if n-s.la.Load() > 300 || s.ic.Load() {
+				stale = append(stale, s)
 				delete(srv.s, cid)
 			}
 		}
 		srv.mu.Unlock()
+		for _, s := range stale {
+			s.Close()
+		}
 		authReplayCache.Range(func(k, v interface{}) bool {
 			if n-v.(int64) > 60 {
 				authReplayCache.Delete(k)
@@ -864,7 +889,7 @@ func (srv *Server) sj() {
 }
 
 func (srv *Server) hs(cn net.Conn) {
-	cn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	cn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	hb := make([]byte, HeaderSize)
 	if _, e := io.ReadFull(cn, hb); e != nil {
 		cn.Close()
@@ -1001,9 +1026,12 @@ func (srv *Server) hs(cn net.Conn) {
 }
 
 func (srv *Server) fdl(s *Session) {
-	// 修正 defer 的出栈顺序，先关闭再标记完成
-	defer s.Close()
-	defer s.wg.Done()
+	defer func() {
+		s.wg.Done()
+		s.ic.Store(true)
+		close(s.cc)
+		s.Close() // Close all streams + FEC, force RST/FIN to client
+	}()
 	
 	for {
 		select {
