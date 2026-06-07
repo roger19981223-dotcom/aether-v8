@@ -2098,7 +2098,7 @@ func runServer() {
 
 	tlsCfg.MinVersion = tls.VersionTLS13
 	tlsCfg.MaxVersion = tls.VersionTLS13
-	tlsCfg.NextProtos = []string{AetherALPN, "h2", "http/1.1"}
+	tlsCfg.NextProtos = []string{"h2", "http/1.1"}
 
 	configMu.RLock()
 	portsStr := GlobalConfig.ListenPorts
